@@ -14,9 +14,11 @@
 from .datamodule import DataModule
 from .s2s_dataset import DuplexS2SDataset
 from .salm_dataset import SALMDataset
+from .infinisst_dataset import InfiniSSTDataset
 
 __all__ = [
     'DataModule',
     'DuplexS2SDataset',
     'SALMDataset',
+    'InfiniSSTDataset',
 ]
