@@ -13,6 +13,8 @@
 # limitations under the License.
 import re
 
+import numpy as np
+
 import torch
 import torch.utils.data
 from lhotse import CutSet, Seconds, compute_num_frames
@@ -24,6 +26,17 @@ from nemo.collections.common.tokenizers import TokenizerSpec
 from nemo.collections.speechlm2.data.utils import get_pad_id
 from nemo.utils import logging
 
+CODE2LANG = {
+    'zh': 'Chinese',
+    'en': 'English',
+    'ja': 'Japanese',
+    'ko': 'Korean',
+    'fr': 'French',
+    'de': 'German',
+    'es': 'Spanish',
+}
+
+INSTRUCTION = "Translate the following speech from {} to {}."
 
 class InfiniSSTDataset(torch.utils.data.Dataset):
     """
@@ -85,44 +98,54 @@ class InfiniSSTDataset(torch.utils.data.Dataset):
         tokenizer: TokenizerSpec,
         frame_length: Seconds,
         source_sample_rate: int,
-        target_sample_rate: int,
         input_roles: list[str] = None,
         output_roles: list[str] = None,
     ):
         self.tokenizer = tokenizer
         self.frame_length = frame_length
         self.source_sample_rate = source_sample_rate
-        self.target_sample_rate = target_sample_rate
         self.input_roles = set(ifnone(input_roles, ["user"]))
-        self.output_roles = set(ifnone(output_roles, ["agent"]))
-
-        assert tokenizer.bos is not None, "BOS support in the tokenizer is required for S2S models."
-        assert tokenizer.eos is not None, "EOS support in the tokenizer is required for S2S models."
+        self.output_roles = set(ifnone(output_roles, ["assistant"]))
 
     def __getitem__(self, cuts: CutSet) -> dict:
-        cuts = cuts.transform_text(_strip_timestamps)
-        source_audio, source_audio_lens = collate_audio(cuts.resample(self.source_sample_rate))
-        target_audio, target_audio_lens = collate_audio(
-            cuts.resample(self.target_sample_rate), recording_field="target_audio"
+        max_chunk = cuts[0].supervisions[0].custom['max_chunk']
+        chunk_size = cuts[0].supervisions[0].custom['chunk_size']
+
+        cuts = cuts.resample(self.source_sample_rate).pad(duration=max_chunk * chunk_size / 1000)
+        source_audio, source_audio_lens = collate_audio(cuts)
+
+        chunk_frame_size = int(np.round(chunk_size / 1000 * self.source_sample_rate))
+
+        messages = []
+        for cut in cuts:
+            message = [
+                {
+                    "role": "system",
+                    "content": INSTRUCTION.format(CODE2LANG['en'], CODE2LANG[cut.supervisions[0].language]), # only support en as source language
+                },
+            ]
+            for step in cut.supervisions[0].text:
+                message.append({
+                    "role": "user",
+                    "content": self.tokenizer.pad_token * chunk_frame_size,
+                })
+                message.append({
+                    "role": "assistant",
+                    "content": step,
+                })
+            messages.append(message)
+        input_ids = self.tokenizer.apply_chat_template(
+            messages,
+            return_tensors='pt',
+            padding=True,
+            truncation=False,
+            add_special_tokens=False,
         )
-        target_tokens, target_token_lens = collate_token_channel(
-            cuts, self.tokenizer, self.frame_length, roles=self.output_roles
-        )
-        source_tokens, source_token_lens = collate_token_channel(
-            cuts, self.tokenizer, self.frame_length, roles=self.input_roles
-        )
+
         return {
             "source_audio": source_audio,
             "source_audio_lens": source_audio_lens,
-            "target_audio": target_audio,
-            "target_audio_lens": target_audio_lens,
-            "target_tokens": target_tokens,
-            "target_token_lens": target_token_lens,
-            "source_tokens": source_tokens,
-            "source_token_lens": source_token_lens,
-            "target_texts": [
-                " ".join(s.text for s in cut.supervisions if s.speaker in self.output_roles) for cut in cuts
-            ],
+            "input_ids": input_ids,
         }
 
 
